@@ -1,19 +1,23 @@
+
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
-import 'package:file_picker/file_picker.dart';
+import 'package:dio/dio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
-  runApp(const YTMusicTestApp());
+  runApp(const DownloaderApp());
 }
 
-class YTMusicTestApp extends StatelessWidget {
-  const YTMusicTestApp({super.key});
+class DownloaderApp extends StatelessWidget {
+  const DownloaderApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'YT Music Test',
+      title: 'Media Downloader',
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF101116),
@@ -23,328 +27,459 @@ class YTMusicTestApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const HomePage(),
+      home: const DownloaderHome(),
     );
   }
 }
 
-class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+class DownloadItem {
+  final String name;
+  final String path;
+  final bool isVideo;
 
-  @override
-  State<HomePage> createState() => _HomePageState();
+  DownloadItem({
+    required this.name,
+    required this.path,
+    required this.isVideo,
+  });
 }
 
-class _HomePageState extends State<HomePage> {
-  late final WebViewController webController;
-  final TextEditingController searchController =
-      TextEditingController();
-
-  int progress = 0;
-  bool isLoading = true;
-  String currentUrl = 'https://www.youtube.com';
-  final List<String> importedAudio = [];
+class DownloaderHome extends StatefulWidget {
+  const DownloaderHome({super.key});
 
   @override
-  void initState() {
-    super.initState();
+  State<DownloaderHome> createState() => _DownloaderHomeState();
+}
 
-    webController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xFF101116))
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onProgress: (value) {
-            if (!mounted) return;
-            setState(() => progress = value);
-          },
-          onPageStarted: (url) {
-            if (!mounted) return;
-            setState(() {
-              isLoading = true;
-              currentUrl = url;
-            });
-          },
-          onPageFinished: (url) {
-            if (!mounted) return;
-            setState(() {
-              isLoading = false;
-              currentUrl = url;
-            });
-          },
-          onWebResourceError: (error) {
-            if (error.isForMainFrame == true && mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('تعذر تحميل الصفحة، تحقق من الإنترنت'),
-                ),
-              );
-            }
-          },
-        ),
-      )
-      ..loadRequest(Uri.parse('https://www.youtube.com'));
+class _DownloaderHomeState extends State<DownloaderHome> {
+  final TextEditingController urlController = TextEditingController();
+  final Dio dio = Dio();
+  final AudioPlayer audioPlayer = AudioPlayer();
+
+  final List<DownloadItem> downloads = [];
+
+  bool downloading = false;
+  double progress = 0;
+  String status = '';
+  String? currentPlaying;
+
+  @override
+  void dispose() {
+    urlController.dispose();
+    audioPlayer.dispose();
+    super.dispose();
   }
 
-  void searchYouTube(String query) {
-    final text = query.trim();
-    if (text.isEmpty) return;
-
-    final encoded = Uri.encodeComponent(text);
-    final url =
-        'https://www.youtube.com/results?search_query=$encoded';
-
-    webController.loadRequest(Uri.parse(url));
-    FocusScope.of(context).unfocus();
-  }
-
-  Future<void> goBack() async {
-    if (await webController.canGoBack()) {
-      await webController.goBack();
-    }
-  }
-
-  Future<void> goForward() async {
-    if (await webController.canGoForward()) {
-      await webController.goForward();
-    }
-  }
-
-  Future<void> reloadPage() async {
-    await webController.reload();
-  }
-
-  Future<void> importAudio() async {
+  String getFileName(String url, String extension) {
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.audio,
-        allowMultiple: true,
-      );
+      final uri = Uri.parse(url);
+      String name = uri.pathSegments.isNotEmpty
+          ? uri.pathSegments.last
+          : 'media_${DateTime.now().millisecondsSinceEpoch}';
 
-      if (result == null || result.files.isEmpty) return;
+      name = Uri.decodeComponent(name);
+
+      if (!name.contains('.')) {
+        name = '$name.$extension';
+      }
+
+      name = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+      return name;
+    } catch (_) {
+      return 'media_${DateTime.now().millisecondsSinceEpoch}.$extension';
+    }
+  }
+
+  Future<void> downloadMedia(bool video) async {
+    final url = urlController.text.trim();
+
+    if (url.isEmpty) {
+      showMessage('أدخل رابط الملف أولاً');
+      return;
+    }
+
+    final uri = Uri.tryParse(url);
+
+    if (uri == null ||
+        !(uri.scheme == 'http' || uri.scheme == 'https')) {
+      showMessage('الرابط غير صحيح');
+      return;
+    }
+
+    setState(() {
+      downloading = true;
+      progress = 0;
+      status = 'جاري التحميل...';
+    });
+
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final folder = Directory('${directory.path}/Downloads');
+
+      if (!await folder.exists()) {
+        await folder.create(recursive: true);
+      }
+
+      final filename = getFileName(url, video ? 'mp4' : 'mp3');
+      final savePath = '${folder.path}/$filename';
+
+      await dio.download(
+        url,
+        savePath,
+        deleteOnError: true,
+        onReceiveProgress: (received, total) {
+          if (total > 0 && mounted) {
+            setState(() {
+              progress = received / total;
+              status =
+                  '${(progress * 100).toStringAsFixed(0)}%';
+            });
+          }
+        },
+        options: Options(
+          followRedirects: true,
+          receiveTimeout: const Duration(minutes: 10),
+        ),
+      );
 
       if (!mounted) return;
 
       setState(() {
-        importedAudio.addAll(
-          result.files.map((file) => file.name),
+        downloads.insert(
+          0,
+          DownloadItem(
+            name: filename,
+            path: savePath,
+            isVideo: video,
+          ),
         );
+        downloading = false;
+        progress = 1;
+        status = 'اكتمل التحميل';
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'تم اختيار ${result.files.length} ملف صوتي',
-          ),
-        ),
-      );
+      showMessage('تم تنزيل الملف بنجاح');
     } catch (e) {
       if (!mounted) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('حدث خطأ أثناء اختيار الملفات'),
-        ),
-      );
+      setState(() {
+        downloading = false;
+        status = 'فشل التحميل';
+      });
+
+      showMessage('فشل التنزيل. الرابط قد لا يكون رابط ملف مباشر.');
     }
   }
 
-  void showDownloadInfo() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'التنزيل متاح للملفات من المصادر التي تسمح بالتنزيل. '
-          'يمكنك استيراد ملفات صوتية من جهازك.',
-        ),
-        duration: Duration(seconds: 4),
+  Future<void> playAudio(DownloadItem item) async {
+    try {
+      await audioPlayer.setFilePath(item.path);
+      await audioPlayer.play();
+
+      if (mounted) {
+        setState(() => currentPlaying = item.path);
+      }
+    } catch (e) {
+      showMessage('تعذر تشغيل الملف الصوتي');
+    }
+  }
+
+  Future<void> pauseAudio() async {
+    await audioPlayer.pause();
+  }
+
+  Future<void> playVideo(DownloadItem item) async {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => VideoScreen(path: item.path),
       ),
     );
   }
 
-  @override
-  void dispose() {
-    searchController.dispose();
-    super.dispose();
+  Future<void> deleteFile(DownloadItem item) async {
+    try {
+      final file = File(item.path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+
+      if (mounted) {
+        setState(() => downloads.remove(item));
+      }
+
+      showMessage('تم حذف الملف');
+    } catch (_) {
+      showMessage('تعذر حذف الملف');
+    }
+  }
+
+  void showMessage(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  Widget downloadButton({
+    required String label,
+    required IconData icon,
+    required bool video,
+  }) {
+    return Expanded(
+      child: ElevatedButton.icon(
+        onPressed: downloading
+            ? null
+            : () => downloadMedia(video),
+        icon: Icon(icon),
+        label: Text(label),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: video ? Colors.blueGrey : Colors.red,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 15),
+        ),
+      ),
+    );
+  }
+
+  Widget downloadCard(DownloadItem item) {
+    final playing = currentPlaying == item.path;
+
+    return Card(
+      color: const Color(0xFF201F27),
+      child: ListTile(
+        leading: Icon(
+          item.isVideo ? Icons.video_file : Icons.music_note,
+          color: item.isVideo ? Colors.blue : Colors.red,
+          size: 32,
+        ),
+        title: Text(
+          item.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(item.isVideo ? 'فيديو' : 'ملف صوتي'),
+        trailing: PopupMenuButton<String>(
+          onSelected: (value) {
+            if (value == 'delete') {
+              deleteFile(item);
+            }
+          },
+          itemBuilder: (_) => const [
+            PopupMenuItem(
+              value: 'delete',
+              child: Text('حذف'),
+            ),
+          ],
+        ),
+        onTap: () {
+          if (item.isVideo) {
+            playVideo(item);
+          } else {
+            playAudio(item);
+          }
+        },
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: const Color(0xFF18171E),
         title: const Text(
-          'YT Music Test',
+          'Media Downloader',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
-        actions: [
-          IconButton(
-            onPressed: reloadPage,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'تحديث',
-          ),
-        ],
+        backgroundColor: const Color(0xFF191820),
       ),
-      body: Column(
+      body: ListView(
+        padding: const EdgeInsets.all(16),
         children: [
-          // Search bar
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: searchController,
-                    textInputAction: TextInputAction.search,
-                    onSubmitted: searchYouTube,
-                    decoration: InputDecoration(
-                      hintText: 'ابحث عن أغنية أو فيديو...',
-                      filled: true,
-                      fillColor: const Color(0xFF22212A),
-                      prefixIcon: const Icon(Icons.search),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        borderSide: BorderSide.none,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton(
-                  onPressed: () =>
-                      searchYouTube(searchController.text),
-                  icon: const Icon(Icons.search),
-                  style: IconButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                  ),
-                ),
-              ],
+          const Icon(
+            Icons.download_for_offline,
+            size: 75,
+            color: Colors.red,
+          ),
+          const SizedBox(height: 15),
+          const Text(
+            'تحميل صوت وفيديو',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
             ),
           ),
-
-          // Browser controls
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Row(
-              children: [
-                IconButton(
-                  onPressed: goBack,
-                  icon: const Icon(Icons.arrow_back),
-                ),
-                IconButton(
-                  onPressed: goForward,
-                  icon: const Icon(Icons.arrow_forward),
-                ),
-                IconButton(
-                  onPressed: reloadPage,
-                  icon: const Icon(Icons.refresh),
-                ),
-                Expanded(
-                  child: Text(
-                    currentUrl,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 11,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          const SizedBox(height: 8),
+          const Text(
+            'أدخل رابط مباشر لملف صوتي أو فيديو',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white60),
           ),
-
-          // Loading bar
-          if (isLoading)
-            LinearProgressIndicator(
-              value: progress == 0 ? null : progress / 100,
-              minHeight: 2,
-              color: Colors.red,
-              backgroundColor: Colors.white12,
-            ),
-
-          // Web browser
-          Expanded(
-            child: WebViewWidget(
-              controller: webController,
-            ),
-          ),
-
-          // Action buttons
-          Container(
-            color: const Color(0xFF18171E),
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 10,
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: showDownloadInfo,
-                    icon: const Icon(Icons.download),
-                    label: const Text('تنزيل'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 14,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: importAudio,
-                    icon: const Icon(Icons.library_music),
-                    label: const Text('ملفاتي الصوتية'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF302E39),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 14,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Imported audio list
-          if (importedAudio.isNotEmpty)
-            Container(
-              height: 110,
-              color: const Color(0xFF18171E),
-              child: ListView.builder(
-                itemCount: importedAudio.length,
-                itemBuilder: (context, index) {
-                  return ListTile(
-                    dense: true,
-                    leading: const Icon(
-                      Icons.music_note,
-                      color: Colors.red,
-                    ),
-                    title: Text(
-                      importedAudio[index],
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.close),
-                      onPressed: () {
-                        setState(() {
-                          importedAudio.removeAt(index);
-                        });
-                      },
-                    ),
-                  );
-                },
+          const SizedBox(height: 20),
+          TextField(
+            controller: urlController,
+            keyboardType: TextInputType.url,
+            decoration: InputDecoration(
+              hintText: 'https://example.com/file.mp3',
+              prefixIcon: const Icon(Icons.link),
+              filled: true,
+              fillColor: const Color(0xFF22212A),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide.none,
               ),
             ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              downloadButton(
+                label: 'تنزيل صوت',
+                icon: Icons.music_note,
+                video: false,
+              ),
+              const SizedBox(width: 10),
+              downloadButton(
+                label: 'تنزيل فيديو',
+                icon: Icons.video_file,
+                video: true,
+              ),
+            ],
+          ),
+          if (downloading) ...[
+            const SizedBox(height: 20),
+            LinearProgressIndicator(value: progress),
+            const SizedBox(height: 8),
+            Text(
+              status,
+              textAlign: TextAlign.center,
+            ),
+          ],
+          if (status.isNotEmpty && !downloading) ...[
+            const SizedBox(height: 12),
+            Text(
+              status,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white60),
+            ),
+          ],
+          const SizedBox(height: 25),
+          const Divider(),
+          const Text(
+            'مكتبتي',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (downloads.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(25),
+              child: Text(
+                'ماكو ملفات محمّلة لحد الآن',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ...downloads.map(downloadCard),
+          if (currentPlaying != null) ...[
+            const SizedBox(height: 15),
+            Card(
+              color: const Color(0xFF292731),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.music_note, color: Colors.red),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text('تشغيل الصوت'),
+                    ),
+                    IconButton(
+                      onPressed: pauseAudio,
+                      icon: const Icon(Icons.pause),
+                    ),
+                    IconButton(
+                      onPressed: () => audioPlayer.play(),
+                      icon: const Icon(Icons.play_arrow),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+class VideoScreen extends StatefulWidget {
+  final String path;
+
+  const VideoScreen({
+    super.key,
+    required this.path,
+  });
+
+  @override
+  State<VideoScreen> createState() => _VideoScreenState();
+}
+
+class _VideoScreenState extends State<VideoScreen> {
+  late VideoPlayerController controller;
+  bool ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    controller = VideoPlayerController.file(File(widget.path))
+      ..initialize().then((_) {
+        if (mounted) {
+          setState(() => ready = true);
+          controller.play();
+        }
+      });
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('مشغل الفيديو')),
+      backgroundColor: Colors.black,
+      body: Center(
+        child: ready
+            ? AspectRatio(
+                aspectRatio: controller.value.aspectRatio,
+                child: VideoPlayer(controller),
+              )
+            : const CircularProgressIndicator(),
+      ),
+      floatingActionButton: ready
+          ? FloatingActionButton(
+              onPressed: () {
+                setState(() {
+                  controller.value.isPlaying
+                      ? controller.pause()
+                      : controller.play();
+                });
+              },
+              child: Icon(
+                controller.value.isPlaying
+                    ? Icons.pause
+                    : Icons.play_arrow,
+              ),
+            )
+          : null,
     );
   }
 }

@@ -1,5 +1,5 @@
 name: yt_music_test
-description: Personal YouTube browser test
+description: Audio and video downloader
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,10 +9,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-
-  cupertino_icons: ^1.0.8
-  webview_flutter: ^4.14.1
+  dio: ^5.8.0+1
+  just_audio: ^0.10.4
+  path_provider: ^2.1.5
   file_picker: ^10.3.7
+  video_player: ^2.10.0
 
 dev_dependencies:
   flutter_test:
